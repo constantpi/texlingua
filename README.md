@@ -215,3 +215,7 @@ Python 3 標準ライブラリによる動作テストを用意しています�
 - `main.tex`、`sections/*.tex`、`figures/diagram.tex`、`references.bib`: サンプル原稿。
 - `tests/test_build.py`: TeX 不要の動作テスト。
 - `.gitignore`: サンプルの生成 PDF と中間生成物の除外。
+
+## ライセンス
+
+このプロジェクトは MIT ライセンスで公開しています。詳細は [LICENSE](LICENSE) を参照してください。
