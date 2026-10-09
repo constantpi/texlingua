@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -393,6 +394,92 @@ class CustomBuilderTests(BuildFixture):
         self.write('main-en.pdf', 'old PDF')
         self.run_build('en', success=False, MOCK_NO_PDF='1')
         self.assertEqual((self.project / 'main-en.pdf').read_text(), 'old PDF')
+
+
+class InvocationTests(BuildFixture):
+    def setUp(self):
+        super().setUp()
+        # Install just the runtime in a separate directory, as for an alias.
+        self.install = self.base / 'installed tools' / 'texlingua'
+        (self.install / 'scripts').mkdir(parents=True)
+        shutil.copy2(BUILD, self.install / 'build.sh')
+        for name in ('tex-source.pl', 'build-ptex2pdf.sh'):
+            shutil.copy2(ROOT / 'scripts' / name, self.install / 'scripts' / name)
+
+    def invoke_alias(self, cwd, entry, mode='en', **env):
+        before = {p: p.read_bytes() for p in self.install.rglob('*') if p.is_file()}
+        # The alias value itself contains shell quoting for the installation path.
+        alias_value = shlex.quote(str(self.install / 'build.sh'))
+        script = 'alias texlingua=' + shlex.quote(alias_value) + '\ntexlingua "$1" "$2"\n'
+        result = subprocess.run(
+            ['bash', '--noprofile', '--norc', '-O', 'expand_aliases', '-c', script, 'bash', entry, mode],
+            cwd=cwd, env=dict(self.env, **env), text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({p: p.read_bytes() for p in self.install.rglob('*') if p.is_file()}, before)
+        for event in self.events():
+            self.assertFalse(Path(event['cwd']).parent.exists())
+        return result.stdout + result.stderr
+
+    def test_alias_uses_paper_directory_and_installed_helpers(self):
+        original = (self.project / 'main.tex').read_bytes()
+        self.invoke_alias(self.project, 'main.tex', 'all')
+        self.assertEqual((self.project / 'main-ja.pdf').read_text(), 'mock PDF ja')
+        self.assertEqual((self.project / 'main-en.pdf').read_text(), 'mock PDF en')
+        self.assertEqual((self.project / 'main.tex').read_bytes(), original)
+        self.assertEqual(self.events()[0]['sources'].keys(), {'main.tex'})
+
+    def test_alias_accepts_absolute_document_from_unrelated_directory(self):
+        launch = self.base / 'launch'
+        launch.mkdir()
+        self.invoke_alias(launch, str(self.project / 'main.tex'))
+        self.assertTrue((self.project / 'main-en.pdf').exists())
+        self.assertEqual(list(launch.iterdir()), [])
+
+    def test_alias_resolves_document_and_builder_from_caller(self):
+        tool = self.base / 'local tools' / 'compile.sh'
+        tool.parent.mkdir()
+        tool.write_text(FAKE_BUILDER)
+        tool.chmod(0o755)
+        # Identical relative names near the paper must not override caller paths.
+        decoy = self.write('local tools/compile.sh', '#!/bin/sh\nexit 99\n')
+        decoy.chmod(0o755)
+        self.invoke_alias(self.base, str((self.project / 'main.tex').relative_to(self.base)),
+                          TEXLINGUA_BUILDER='local tools/compile.sh')
+        self.assertEqual((self.project / 'main-en.pdf').read_text(), 'custom PDF en')
+        self.assertEqual([x['args'] for x in self.events()], [['./main.tex', 'en']])
+
+    def test_cdpath_does_not_redirect_relative_document(self):
+        shadow = self.base / 'cdpath'
+        decoy = shadow / self.project.name
+        decoy.mkdir(parents=True)
+        (decoy / 'main.tex').write_text('Wrong project\n')
+        self.invoke_alias(self.base, str((self.project / 'main.tex').relative_to(self.base)),
+                          CDPATH=str(shadow))
+        self.assertTrue((self.project / 'main-en.pdf').exists())
+        self.assertFalse((decoy / 'main-en.pdf').exists())
+
+    def test_cdpath_does_not_redirect_relative_builder(self):
+        local = self.base / 'tools' / 'compile.sh'
+        local.parent.mkdir()
+        local.write_text(FAKE_BUILDER)
+        local.chmod(0o755)
+        shadow = self.base / 'cdpath'
+        decoy = shadow / 'tools' / 'compile.sh'
+        decoy.parent.mkdir(parents=True)
+        decoy.write_text('#!/bin/sh\nexit 99\n')
+        decoy.chmod(0o755)
+        self.invoke_alias(self.base, str(self.project / 'main.tex'),
+                          TEXLINGUA_BUILDER='tools/compile.sh', CDPATH=str(shadow))
+        self.assertEqual((self.project / 'main-en.pdf').read_text(), 'custom PDF en')
+
+    def test_relative_script_path_ignores_cdpath(self):
+        shadow = self.base / 'cdpath'
+        (shadow / 'installed tools' / 'texlingua').mkdir(parents=True)
+        result = subprocess.run(
+            [str((self.install / 'build.sh').relative_to(self.base)), str(self.project / 'main.tex'), 'en'],
+            cwd=self.base, env=dict(self.env, CDPATH=str(shadow)), text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.project / 'main-en.pdf').exists())
 
 
 if __name__ == '__main__':

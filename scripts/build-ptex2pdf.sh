@@ -5,7 +5,7 @@ set -euo pipefail
 entry=$1
 stem=${entry#./}
 stem=${stem%.tex}
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 command -v ptex2pdf >/dev/null || { echo 'Error: Required command not found: ptex2pdf' >&2; exit 1; }
 
 inputs=$(mktemp .texlingua-inputs.XXXXXXXX)

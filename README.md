@@ -18,6 +18,42 @@ PDF は指定した TeX ファイルと同じディレクトリに出力しま�
 `paper.tex` なら `paper.pdf`、`paper-ja.pdf`、`paper-en.pdf` になります。
 引数不足、過剰な引数、不明な言語指定、空の言語指定はエラーです。
 
+### alias から利用する
+
+リポジトリを原稿とは別の場所に置き、Bash の `~/.bashrc` などに alias を登録できます。
+`build.sh` と同梱の `scripts/` は同じリポジトリ内に保持してください。
+
+```bash
+alias texlingua='/workspace/texlingua/build.sh'
+
+cd /path/to/paper
+texlingua paper.tex en
+TEXLINGUA_BUILDER=./compile-paper.sh texlingua paper.tex all
+```
+
+リポジトリのパスに空白がある場合は、alias の値の中でもパスを引用します。
+
+```bash
+alias texlingua='"/path with spaces/texlingua/build.sh"'
+```
+
+パスの基準は次のとおりです。リポジトリの場所へ `cd` する必要はありません。
+
+| 対象 | 基準 |
+|---|---|
+| 引数の `paper.tex` | コマンドを実行したディレクトリ |
+| 相対指定の `TEXLINGUA_BUILDER` | コマンドを実行したディレクトリ |
+| 同梱の補助プログラム・標準ビルダー | `build.sh` があるディレクトリ |
+| コピーする原稿・画像・設定ファイル | 指定 TeX があるディレクトリ以下 |
+| ビルダー実行中の相対パス | `/tmp` 内の原稿コピーのルート |
+| 完成した PDF の出力先 | 指定 TeX と同じディレクトリ |
+
+たとえば `texlingua papers/paper.tex en` では原稿のコピー範囲と PDF 出力先は `papers/` ですが、
+`TEXLINGUA_BUILDER=./compile.sh` は起動場所の `./compile.sh` を指します。
+このパス解決は、シェルの `CDPATH` の設定に影響されません。
+
+### 必要な環境
+
 共通の依存関係は Bash、Perl（標準モジュールのみ）、GNU tar、一般的な Unix コマンドです。
 標準ビルダーでは `ptex2pdf` と pLaTeX・dvipdfmx、BibTeX 文献を使用するときは `pbibtex` も必要です。
 独自ビルダーを指定した場合は、そのビルダーが使う TeX 環境を用意してください。
@@ -160,6 +196,7 @@ Perl の Unicode プロパティ `Hiragana`、`Katakana`、`Han` と、`〆`・�
 
 ```bash
 bash -n build.sh
+bash -n scripts/build-ptex2pdf.sh
 perl -c scripts/tex-source.pl
 python3 tests/test_build.py
 ```
@@ -168,6 +205,7 @@ Python 3 標準ライブラリによる動作テストを用意しています�
 テストは一時的な模擬 `ptex2pdf` / `pbibtex` や独自ビルダーを使うため、TeX がなくても実行できます。
 四つのビルドモード、翻訳ペアとエラー、CRLF、Unicode 検出、コメントのエスケープ、複数ファイル、
 読み込み記録、文献レシピ、ビルダー差し替え、失敗時の既存 PDF 保護、`all` の継続、コピー除外、原本保持、一時領域削除を確認します。
+別ディレクトリへの配置、alias 経由の起動、空白を含むパス、`CDPATH` を設定した環境でのパス解決も検証します。
 
 ## 実装ファイル
 

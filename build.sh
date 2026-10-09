@@ -12,8 +12,10 @@ case "$mode" in default|ja|en|all) ;; *) usage; exit 2 ;; esac
 if [[ $# == 2 && $mode == default ]]; then usage; exit 2; fi
 if [[ ! -f $1 || $1 != *.tex ]]; then usage; die "TeX file not found: $1"; fi
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-source_dir=$(cd -- "$(dirname -- "$1")" && pwd -P)
+# Internal files are relative to this script; user paths are relative to the
+# invocation directory. Ignore CDPATH so cd cannot search elsewhere or print.
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+source_dir=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)
 entry=$(basename -- "$1")
 # ptex2pdf itself constructs shell commands; keep the entry name shell-safe.
 if [[ ! $entry =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.\ -]*\.tex$ ]]; then
@@ -30,7 +32,7 @@ builder=${TEXLINGUA_BUILDER:-"$script_dir/scripts/build-ptex2pdf.sh"}
 [[ -f $builder && -x $builder ]] || die "Builder must be an executable file: $builder"
 # Resolve before entering the temporary tree. This is a single executable path,
 # not a shell command or a name to search for on PATH.
-builder=$(cd -- "$(dirname -- "$builder")" && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$builder")")
+builder=$(CDPATH= cd -- "$(dirname -- "$builder")" && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$builder")")
 
 work=$(mktemp -d /tmp/texlingua.XXXXXXXX)
 publish=''
