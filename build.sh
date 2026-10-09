@@ -22,10 +22,15 @@ if [[ ! $entry =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.\ -]*\.tex$ ]]; then
 fi
 stem=${entry%.tex}
 helper="$script_dir/scripts/tex-source.pl"
-for tool in perl tar mktemp ptex2pdf; do
+for tool in perl tar mktemp; do
     command -v "$tool" >/dev/null || die "Required command not found: $tool"
 done
 [[ -f $helper ]] || die "Helper not found: $helper"
+builder=${TEXLINGUA_BUILDER:-"$script_dir/scripts/build-ptex2pdf.sh"}
+[[ -f $builder && -x $builder ]] || die "Builder must be an executable file: $builder"
+# Resolve before entering the temporary tree. This is a single executable path,
+# not a shell command or a name to search for on PATH.
+builder=$(cd -- "$(dirname -- "$builder")" && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$builder")")
 
 work=$(mktemp -d /tmp/texlingua.XXXXXXXX)
 publish=''
@@ -62,32 +67,16 @@ build_one() (
     if [[ $language == ja ]]; then
         perl "$helper" preprocess .
     fi
-    tex_options='-interaction=nonstopmode -kanji=utf8 -synctex=1 -halt-on-error -file-line-error -recorder'
-    run_tex() {
-        ptex2pdf -l -ot "$tex_options" "./$entry"
-        # Preserve the union of inputs, including files read only on early passes.
-        if [[ -f $stem.fls ]]; then cat "$stem.fls" >> "$work/$language.inputs"; fi
-    }
     echo "Building: $entry ($language)"
-    run_tex
-    # Status 0 means a bibliography is requested; 1 means no bibliography.
-    if perl "$helper" needs-bib "$stem.aux"; then
-        command -v pbibtex >/dev/null || { echo 'Error: Required command not found: pbibtex' >&2; exit 1; }
-        pbibtex "$stem" -kanji=utf8
-        run_tex
-    else
-        bib_status=$?
-        if (( bib_status != 1 )); then exit "$bib_status"; fi
-    fi
-    run_tex
+    "$builder" "./$entry" "$language"
     [[ -s $stem.pdf ]] || { echo "Error: PDF was not generated: $stem.pdf" >&2; exit 1; }
     if [[ $language == en ]]; then
-        perl "$helper" scan . "$work/$language.inputs" "$entry"
+        perl "$helper" scan . "$stem.fls" "$entry"
     fi
 )
 
 export -f build_one
-export work helper entry stem
+export work helper entry stem builder
 status=0
 languages=("$mode")
 if [[ $mode == all ]]; then languages=(ja en); fi

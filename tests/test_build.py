@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -63,7 +64,34 @@ if not os.environ.get('MOCK_NO_FLS'):
 '''
 
 
-class BuildTests(unittest.TestCase):
+FAKE_BUILDER = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+assert len(sys.argv) == 3
+entry, language = sys.argv[1:]
+assert entry.startswith('./')
+assert language in ('default', 'ja', 'en')
+cwd = Path.cwd()
+assert cwd.name == language
+state = Path(os.environ['MOCK_STATE'])
+record = dict(tool='custom', language=language, cwd=str(cwd), args=sys.argv[1:],
+    sources={str(p.relative_to(cwd)): p.read_text() for p in cwd.rglob('*.tex')})
+with (state / 'events.jsonl').open('a') as f:
+    f.write(json.dumps(record) + '\n')
+stem = Path(entry).stem
+if language in os.environ.get('MOCK_FAIL_LANGUAGE', '').split(','):
+    Path(stem + '.pdf').write_text('partial custom PDF')
+    sys.exit(7)
+if not os.environ.get('MOCK_NO_PDF'):
+    Path(stem + '.pdf').write_text('custom PDF ' + language)
+if not os.environ.get('MOCK_NO_FLS'):
+    inputs = [entry] + os.environ.get('MOCK_INPUTS', '').split('|')
+    lines = ['PWD ' + str(cwd)] + ['INPUT ' + p for p in inputs if p]
+    Path(stem + '.fls').write_text('\n'.join(lines) + '\n')
+'''
+
+
+class BuildFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="texlingua-tests.")
         self.addCleanup(self.temp.cleanup)
@@ -79,6 +107,7 @@ class BuildTests(unittest.TestCase):
             tool.write_text(FAKE_TEX)
             tool.chmod(0o755)
         self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", MOCK_STATE=str(self.state))
+        self.env.pop('TEXLINGUA_BUILDER', None)
         self.write("main.tex", "%j 日本語 $n$。\nEnglish $n$.\n未翻訳。\n")
 
     def write(self, name, content):
@@ -102,6 +131,8 @@ class BuildTests(unittest.TestCase):
         path = self.state / "events.jsonl"
         return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
 
+
+class BuildTests(BuildFixture):
     def test_default_is_unmodified_and_silent(self):
         original = (self.project / "main.tex").read_bytes()
         output = self.run_build()
@@ -276,6 +307,92 @@ class BuildTests(unittest.TestCase):
         self.write('main.tex', '%j 本文\n')
         self.run_build('ja', success=False)
         self.assertEqual(set(Path('/tmp').glob('texlingua.*')) - before, set())
+
+
+class CustomBuilderTests(BuildFixture):
+    def setUp(self):
+        super().setUp()
+        self.builder = self.base / 'tools with spaces' / 'compile paper.sh'
+        self.builder.parent.mkdir()
+        self.builder.write_text(FAKE_BUILDER)
+        self.builder.chmod(0o755)
+        self.env['TEXLINGUA_BUILDER'] = str(self.builder)
+
+    def test_custom_builder_receives_each_mode_and_transformed_sources(self):
+        for mode in (None, 'ja', 'en', 'all'):
+            with self.subTest(mode=mode):
+                self.run_build(mode)
+        events = self.events()
+        self.assertEqual([x['language'] for x in events], ['default', 'ja', 'en', 'ja', 'en'])
+        self.assertTrue(all(x['tool'] == 'custom' for x in events))
+        self.assertIn('%j ', events[0]['sources']['main.tex'])
+        self.assertNotIn('%j ', events[1]['sources']['main.tex'])
+        self.assertIn('%j ', events[2]['sources']['main.tex'])
+
+    def test_custom_builder_requires_no_tex_tools(self):
+        minimal = self.base / 'minimal-bin'
+        minimal.mkdir()
+        for name in ('bash', 'perl', 'tar', 'mktemp', 'dirname', 'basename',
+                     'mkdir', 'cp', 'rm', 'mv', 'python3'):
+            (minimal / name).symlink_to(shutil.which(name))
+        self.run_build('all', PATH=str(minimal))
+        self.assertTrue(all(x['tool'] == 'custom' for x in self.events()))
+
+    def test_relative_builder_is_resolved_from_invocation_directory(self):
+        relative = str(self.builder.relative_to(self.base))
+        self.run_build('en', TEXLINGUA_BUILDER=relative)
+        self.assertEqual((self.project / 'main-en.pdf').read_text(), 'custom PDF en')
+
+    def test_empty_builder_uses_default(self):
+        self.run_build('en', TEXLINGUA_BUILDER='')
+        self.assertEqual([x['tool'] for x in self.events()], ['ptex2pdf', 'ptex2pdf'])
+
+    def test_invalid_builder_fails_before_copy_or_compilation(self):
+        plain = self.base / 'not-executable'
+        plain.write_text('#!/bin/sh\nexit 0\n')
+        for path in (str(self.base / 'missing'), str(plain), str(self.base),
+                     str(self.builder) + ' --option'):
+            with self.subTest(path=path):
+                output = self.run_build('en', success=False, TEXLINGUA_BUILDER=path)
+                self.assertIn('Builder must be an executable file', output)
+                self.assertEqual(self.events(), [])
+
+    def test_builder_path_is_not_evaluated_as_shell_code(self):
+        literal = self.builder.parent / 'compile $(touch INJECTED);.sh'
+        self.builder.rename(literal)
+        self.run_build('en', TEXLINGUA_BUILDER=str(literal))
+        self.assertFalse((self.base / 'INJECTED').exists())
+        self.assertFalse((self.project / 'INJECTED').exists())
+
+    def test_recorder_excludes_unused_sources(self):
+        self.write('main.tex', '\\input{sections/read}\n')
+        self.write('sections/read.tex', '日本語\n')
+        self.write('unused.tex', '未使用\n')
+        output = self.run_build('all', MOCK_INPUTS='sections/read.tex')
+        self.assertIn('sections/read.tex:1', output)
+        self.assertNotIn('unused.tex:', output)
+        self.assertEqual(output.count('Untranslated Japanese detected:'), 1)
+
+    def test_missing_recorder_uses_fallback(self):
+        self.write('unused.tex', '未使用\n')
+        output = self.run_build('en', MOCK_NO_FLS='1')
+        self.assertIn('No .fls record', output)
+        self.assertIn('unused.tex:1', output)
+
+    def test_all_publishes_only_successful_language(self):
+        for failed in ('ja', 'en'):
+            with self.subTest(failed=failed):
+                for language in ('ja', 'en'):
+                    self.write(f'main-{language}.pdf', 'old PDF')
+                self.run_build('all', success=False, MOCK_FAIL_LANGUAGE=failed)
+                other = 'en' if failed == 'ja' else 'ja'
+                self.assertEqual((self.project / f'main-{failed}.pdf').read_text(), 'old PDF')
+                self.assertEqual((self.project / f'main-{other}.pdf').read_text(), 'custom PDF ' + other)
+
+    def test_success_without_pdf_preserves_previous_pdf(self):
+        self.write('main-en.pdf', 'old PDF')
+        self.run_build('en', success=False, MOCK_NO_PDF='1')
+        self.assertEqual((self.project / 'main-en.pdf').read_text(), 'old PDF')
 
 
 if __name__ == '__main__':
