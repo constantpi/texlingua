@@ -2,13 +2,13 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 FILE.tex [ja|en|all]" >&2
+    echo "Usage: $0 FILE.tex [ja|en|both|all]" >&2
 }
 die() { echo "Error: $*" >&2; exit 1; }
 
 if (( $# < 1 || $# > 2 )); then usage; exit 2; fi
 mode=${2-default}
-case "$mode" in default|ja|en|all) ;; *) usage; exit 2 ;; esac
+case "$mode" in default|ja|en|both|all) ;; *) usage; exit 2 ;; esac
 if [[ $# == 2 && $mode == default ]]; then usage; exit 2; fi
 if [[ ! -f $1 || $1 != *.tex ]]; then usage; die "TeX file not found: $1"; fi
 
@@ -54,6 +54,7 @@ tar -C "$source_dir" --exclude-vcs \
     --exclude='*.bbl' --exclude='*.blg' --exclude='*.toc' --exclude='*.out' \
     --exclude='*.lof' --exclude='*.lot' --exclude='*.nav' --exclude='*.snm' \
     --exclude="./$stem.pdf" --exclude="./$stem-ja.pdf" --exclude="./$stem-en.pdf" \
+    --exclude="./$stem-both.pdf" \
     -cf - . | tar -C "$work/source" -xf -
 perl "$helper" check-tree "$work/source"
 
@@ -68,6 +69,8 @@ build_one() (
     cd "$build_dir"
     if [[ $language == ja ]]; then
         perl "$helper" preprocess .
+    elif [[ $language == both ]]; then
+        perl "$helper" both . "$entry"
     fi
     echo "Building: $entry ($language)"
     "$builder" "./$entry" "$language"

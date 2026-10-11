@@ -71,7 +71,7 @@ from pathlib import Path
 assert len(sys.argv) == 3
 entry, language = sys.argv[1:]
 assert entry.startswith('./')
-assert language in ('default', 'ja', 'en')
+assert language in ('default', 'ja', 'en', 'both')
 cwd = Path.cwd()
 assert cwd.name == language
 state = Path(os.environ['MOCK_STATE'])
@@ -396,6 +396,168 @@ class CustomBuilderTests(BuildFixture):
         self.assertEqual((self.project / 'main-en.pdf').read_text(), 'old PDF')
 
 
+class BothTests(BuildFixture):
+    def test_prose_pair_is_small_gray_then_english_without_new_paragraph(self):
+        original = '%j 日本語の文章。\nEnglish text.\n\n未翻訳。\n'
+        self.write('main.tex', original)
+        output = self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertTrue(converted.endswith(
+            '{\\small\\color[gray]{0.45}%\n日本語の文章。\n\\unskip}\\space\n'
+            'English text.\n\n未翻訳。\n'))
+        self.assertNotIn('\\par', converted)
+        self.assertNotIn('\\begin{quote}', converted)
+        self.assertNotIn('Untranslated Japanese', output)
+        self.assertEqual((self.project / 'main-both.pdf').read_text(), 'mock PDF both')
+        self.assertEqual((self.project / 'main.tex').read_text(), original)
+
+    def test_leading_commands_on_either_side_select_english(self):
+        pairs = [
+            ('\\section{日本語}', '\\section{English}'),
+            ('\\subsection{準備}', '\\subsection{Preliminaries}'),
+            ('\\caption{図}', '\\caption{Figure}'),
+            ('\\emph{日本語}', 'English.'),
+            ('日本語。', '\\emph{English.}'),
+        ]
+        source = ''.join('%j ' + japanese + '\n' + english + '\n' for japanese, english in pairs)
+        self.write('main.tex', source)
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertTrue(converted.endswith(''.join(english + '\n' for _, english in pairs)))
+        self.assertNotIn('\\small', converted)
+        for japanese, _ in pairs:
+            self.assertNotIn(japanese, converted)
+
+    def test_indentation_preserved_and_ignored_for_classification(self):
+        self.write('main.tex', '\t  %j \t日本語。\n    English.\n'
+                   '  %j   \\emph{除外}\n\tEnglish only.\n'
+                   '\t%j 除外。\n  \t\\emph{English only.}\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertTrue(converted.endswith(
+            '\t  {\\small\\color[gray]{0.45}%\n\t  日本語。\n\t  \\unskip}\\space\n'
+            '    English.\n\tEnglish only.\n  \t\\emph{English only.}\n'))
+
+    def test_inline_commands_math_and_citations_are_retained(self):
+        japanese = '式 $n^2$ と図~\\ref{fig:sample} を参照する~\\cite{sample}。'
+        english = 'See $n^2$ and Figure~\\ref{fig:sample}~\\cite{sample}.'
+        self.write('main.tex', f'%j {japanese}\n{english}\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertIn(japanese + '\n\\unskip}\\space\n' + english, converted)
+        self.assertEqual(converted.count('\\small\\color[gray]{0.45}'), 1)
+
+    def test_unpaired_lines_and_ordinary_comments_are_unchanged(self):
+        source = '未翻訳の段落。\n% 通常コメント\n%japanese comment\n%j\n\\section{Title}\n'
+        self.write('main.tex', source)
+        self.run_build('both')
+        self.assertTrue(self.events()[0]['sources']['main.tex'].endswith(source))
+
+    def test_comment_cannot_swallow_closing_group(self):
+        self.write('main.tex', '%j 割合は $50\\%$。 % 日本語側コメント\n'
+                   'The ratio is $50\\%$. % English comment\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertIn('% 日本語側コメント\n\\unskip}\\space\n', converted)
+        self.assertTrue(converted.endswith('The ratio is $50\\%$. % English comment\n'))
+
+    def test_multiple_files_and_color_support_only_in_entry(self):
+        self.write('main.tex', '\\documentclass{jsarticle}\n'
+                   '\\usepackage[dvipdfmx,dvipsnames]{xcolor}\n'
+                   '\\begin{document}\n\\input{sections/read}\n\\end{document}\n')
+        self.write('sections/read.tex', '%j 日本語。\nEnglish.\n')
+        self.write('unused.tex', '%j 未使用の翻訳。\nUnused translation.\n')
+        self.run_build('both')
+        sources = self.events()[0]['sources']
+        self.assertIn('\\AddToHook{begindocument/before}', sources['main.tex'])
+        self.assertIn('\\ifdefined\\color\\else', sources['main.tex'])
+        self.assertIn('\\RequirePackage[dvipdfmx]{color}', sources['main.tex'])
+        self.assertIn('\\RequirePackage{color}', sources['main.tex'])
+        self.assertIn('\\usepackage[dvipdfmx,dvipsnames]{xcolor}', sources['main.tex'])
+        for file in ('sections/read.tex', 'unused.tex'):
+            self.assertIn('\\small\\color[gray]{0.45}', sources[file])
+            self.assertNotIn('\\AddToHook', sources[file])
+
+    def test_both_invalid_pairs_preserve_pdf_and_clean_tmp(self):
+        self.write('main-both.pdf', 'old PDF')
+        before = set(Path('/tmp').glob('texlingua.*'))
+        for tail in ('', '\n', ' \t\n', '% comment\n', '  %j next\n'):
+            with self.subTest(tail=tail):
+                self.write('main.tex', '%j 日本語\n' + tail)
+                output = self.run_build('both', success=False)
+                self.assertIn('main.tex:1:', output)
+                self.assertEqual(self.events(), [])
+        self.assertEqual((self.project / 'main-both.pdf').read_text(), 'old PDF')
+        self.assertEqual(set(Path('/tmp').glob('texlingua.*')) - before, set())
+
+    def test_both_failure_does_not_affect_existing_modes(self):
+        self.write('main-both.pdf', 'old both PDF')
+        self.run_build('both', success=False, MOCK_FAIL_LANGUAGE='both')
+        for mode in (None, 'ja', 'en', 'all'):
+            with self.subTest(mode=mode):
+                self.run_build(mode, MOCK_FAIL_LANGUAGE='both')
+        self.assertEqual((self.project / 'main-both.pdf').read_text(), 'old both PDF')
+
+    def test_all_never_runs_both_or_creates_its_pdf(self):
+        self.run_build('all', MOCK_FAIL_LANGUAGE='both')
+        self.assertEqual({x['language'] for x in self.events()}, {'ja', 'en'})
+        self.assertFalse((self.project / 'main-both.pdf').exists())
+        self.assertTrue(all('\\AddToHook' not in x['sources']['main.tex'] for x in self.events()))
+
+    def test_all_preserves_existing_both_pdf_even_if_a_build_fails(self):
+        pdf = self.write('main-both.pdf', 'existing both PDF')
+        before = (pdf.read_bytes(), pdf.stat().st_mtime_ns, pdf.stat().st_ino)
+        for failure in ('', 'ja', 'en'):
+            with self.subTest(failure=failure):
+                self.run_build('all', success=not failure, MOCK_FAIL_LANGUAGE=failure)
+                self.assertEqual((pdf.read_bytes(), pdf.stat().st_mtime_ns, pdf.stat().st_ino), before)
+        self.assertEqual({x['language'] for x in self.events()}, {'ja', 'en'})
+        self.assertTrue(all('main-both.pdf' not in x['files'] for x in self.events()))
+
+    def test_custom_builder_receives_both_and_no_scan_is_run(self):
+        builder = self.base / 'custom-builder'
+        builder.write_text(FAKE_BUILDER)
+        builder.chmod(0o755)
+        output = self.run_build('both', TEXLINGUA_BUILDER=str(builder), MOCK_NO_FLS='1')
+        self.assertEqual([x['args'] for x in self.events()], [['./main.tex', 'both']])
+        self.assertIn('\\small\\color', self.events()[0]['sources']['main.tex'])
+        self.assertNotIn('Untranslated Japanese', output)
+        self.assertNotIn('No .fls', output)
+
+    def test_both_pdf_name_follows_entry(self):
+        self.write('my paper.tex', '%j 日本語。\nEnglish.\n')
+        self.run_build('both', entry='my paper.tex')
+        self.assertEqual((self.project / 'my paper-both.pdf').read_text(), 'mock PDF both')
+        self.assertFalse((self.project / 'main-both.pdf').exists())
+
+    def test_both_without_pdf_preserves_existing_pdf(self):
+        self.write('main-both.pdf', 'old PDF')
+        self.run_build('both', success=False, MOCK_NO_PDF='1')
+        self.assertEqual((self.project / 'main-both.pdf').read_text(), 'old PDF')
+
+    def test_both_keeps_original_tree_and_publishes_only_one_pdf(self):
+        self.write('sections/read.tex', '%j 日本語。\nEnglish.\n')
+        self.write('main-ja.pdf', 'ja PDF')
+        self.write('main-en.pdf', 'en PDF')
+        before = {p: p.read_bytes() for p in self.project.rglob('*') if p.is_file()}
+        self.run_build('both')
+        for path, data in before.items():
+            self.assertEqual(path.read_bytes(), data)
+        after = {p for p in self.project.rglob('*') if p.is_file()}
+        self.assertEqual(after - before.keys(), {self.project / 'main-both.pdf'})
+
+    def test_crlf_bom_and_missing_final_newline(self):
+        path = self.project / 'main.tex'
+        original = '\ufeff\\documentclass{jsarticle}\r\n%j 日本語\r\nEnglish'.encode()
+        path.write_bytes(original)
+        subprocess.run(['perl', str(HELPER), 'both', str(self.project), 'main.tex'], check=True)
+        converted = path.read_bytes()
+        self.assertTrue(converted.startswith(b'\xef\xbb\xbf% texlingua:'))
+        self.assertEqual(converted.count(b'\xef\xbb\xbf'), 1)
+        self.assertNotIn(b'\n', converted.replace(b'\r\n', b''))
+        self.assertTrue(converted.endswith('日本語\r\n\\unskip}\\space\r\nEnglish'.encode()))
+
+
 class InvocationTests(BuildFixture):
     def setUp(self):
         super().setUp()
@@ -434,6 +596,10 @@ class InvocationTests(BuildFixture):
         self.invoke_alias(launch, str(self.project / 'main.tex'))
         self.assertTrue((self.project / 'main-en.pdf').exists())
         self.assertEqual(list(launch.iterdir()), [])
+
+    def test_alias_can_build_both_from_separate_installation(self):
+        self.invoke_alias(self.project, 'main.tex', 'both')
+        self.assertEqual((self.project / 'main-both.pdf').read_text(), 'mock PDF both')
 
     def test_alias_resolves_document_and_builder_from_caller(self):
         tool = self.base / 'local tools' / 'compile.sh'

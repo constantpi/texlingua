@@ -29,20 +29,56 @@ sub tex_files {
 }
 
 sub preprocess {
-    my ($file) = @_;
+    my ($file, $mode, $entry) = @_;
+    $mode //= 'ja';
     my @lines = read_lines($file);
     my @result;
     for (my $i = 0; $i < @lines; ++$i) {
         if ($lines[$i] =~ /^([\t ]*)%j[\t ]+(.*)/s) {
-            my $restored = $1 . $2;
+            my ($indent, $body) = ($1, $2);
             if ($i + 1 == @lines || $lines[$i + 1] =~ /^[\t ]*(?:%|\r?\n|\z)/) {
                 die "$file:" . ($i + 1) . ": %j must be followed by one nonempty, non-comment English line.\n";
             }
-            push @result, $restored;
+            if ($mode eq 'both') {
+                my $english = $lines[$i + 1];
+                # Deliberately lexical: any leading command selects English only.
+                if ($body !~ /^[\t ]*\\/ && $english !~ /^[\t ]*\\/) {
+                    my $newline = $body =~ /\r\n\z/ ? "\r\n" : "\n";
+                    push @result, $indent . '{\small\color[gray]{0.45}%' . $newline,
+                        $indent . $body, $indent . '\unskip}\space' . $newline;
+                }
+                push @result, $english;
+            } else {
+                push @result, $indent . $body;
+            }
             ++$i;
         } else {
             push @result, $lines[$i];
         }
+    }
+    if ($entry) {
+        # Register before reading the document, but load color after its own
+        # preamble. Existing color/xcolor options must take precedence.
+        my $support = <<'TEX';
+% texlingua: both-mode support (temporary copy only).
+\ifdefined\AddToHook
+  \AddToHook{begindocument/before}{%
+    \ifdefined\color\else
+      \ifdefined\kanjiskip
+        \RequirePackage[dvipdfmx]{color}%
+      \else
+        \RequirePackage{color}%
+      \fi
+    \fi
+  }
+\else
+  \PackageError{texlingua}{both mode requires LaTeX 2020-10-01 or newer}{Update your LaTeX format.}
+\fi
+TEX
+        $support =~ s/\n/\r\n/g if @lines && $lines[0] =~ /\r\n\z/;
+        # Keep a UTF-8 BOM at the start rather than moving it into the preamble.
+        my $bom = @result && $result[0] =~ s/\A\xEF\xBB\xBF// ? "\xEF\xBB\xBF" : '';
+        unshift @result, $bom . $support;
     }
     open my $fh, '>:raw', $file or die "$file: $!\n";
     print {$fh} @result or die "$file: $!\n";
@@ -114,6 +150,11 @@ if ($action eq 'check-tree') {
     tex_files($args[0]);
 } elsif ($action eq 'preprocess') {
     preprocess($_) for tex_files($args[0]);
+} elsif ($action eq 'both') {
+    my ($root, $entry) = @args;
+    my $entry_path = abs_path("$root/$entry");
+    die "Entry file not found: $entry\n" unless defined $entry_path && -f $entry_path;
+    preprocess($_, 'both', abs_path($_) eq $entry_path) for tex_files($root);
 } elsif ($action eq 'scan') {
     scan(@args);
 } elsif ($action eq 'needs-bib') {

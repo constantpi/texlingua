@@ -1,6 +1,7 @@
 /main.pdf
 /main-ja.pdf
 /main-en.pdf
+/main-both.pdf
 .texlingua-pdf.*
 *.aux
 *.bbl
