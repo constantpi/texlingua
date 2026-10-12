@@ -397,6 +397,117 @@ class CustomBuilderTests(BuildFixture):
 
 
 class BothTests(BuildFixture):
+    def test_tabular_pairs_are_english_only_including_single_column_rows(self):
+        self.write('main.tex', '\\begin{tabular}{c|l}\n'
+                   '%j 量 & 上界 \\\\ \\hline\nQuantity & Upper bound \\\\ \\hline\n'
+                   '%j 誤差 & $<1$\nError & $<1$\n\\end{tabular}\n'
+                   '\\begin{tabular}{l}\n%j 見出し\nHeading\n\\end{tabular}\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertTrue(converted.endswith('\\begin{tabular}{c|l}\n'
+                        'Quantity & Upper bound \\\\ \\hline\nError & $<1$\n\\end{tabular}\n'
+                        '\\begin{tabular}{l}\nHeading\n\\end{tabular}\n'))
+        self.assertNotIn('\\small', converted)
+
+    def test_aligned_math_rows_are_english_only(self):
+        self.write('main.tex', '\\[\n\\begin{aligned}\n'
+                   '%j & f(x) \\mid \\text{その他の変数} \\\\\n'
+                   '& f(x) \\mid \\text{all other variables} \\\\\n'
+                   '& = x^2\n\\end{aligned}\n\\]\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertIn('& f(x) \\mid \\text{all other variables} \\\\\n& = x^2\n', converted)
+        self.assertNotIn('その他の変数', converted)
+        self.assertNotIn('\\small', converted)
+
+    def test_bilingual_prose_resumes_after_environment_end(self):
+        self.write('main.tex', '%j 前の文章。\nBefore.\n'
+                   '\\begin{tabular}{l}\n%j 見出し\nHeading\n\\end{tabular}\n'
+                   '%j 後の文章。\nAfter.\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertEqual(converted.count('\\small\\color[gray]'), 2)
+        self.assertIn('前の文章。', converted)
+        self.assertIn('後の文章。', converted)
+        self.assertNotIn('見出し', converted)
+
+    def test_nested_environments_keep_outer_scope_active(self):
+        self.write('main.tex', '\\begin{tabular}{l}\n'
+                   '\\begin{tabular}{l}\n%j 内側\nInner\n\\end{tabular}\n'
+                   '\\begin{aligned}\n%j & 数式\n& x=1\n\\end{aligned}\n'
+                   '%j 外側\nOuter\n\\end{tabular}\n%j 本文\nProse\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertEqual(converted.count('\\small\\color[gray]'), 1)
+        self.assertNotIn('内側', converted)
+        self.assertNotIn('外側', converted)
+        self.assertNotIn('数式', converted)
+        self.assertIn('本文', converted)
+
+    def test_comments_do_not_change_environment_state(self):
+        self.write('main.tex', '% \\begin{tabular}{l}\n'
+                   '%j 本文A\nProse A % \\begin{aligned}\n'
+                   '\\begin{tabular}{l}\n% \\end{tabular}\n'
+                   '%j 見出し % \\end{tabular}\nHeading % \\end{tabular}\n'
+                   '%j 項目\nEntry\n\\end{tabular}\n%j 本文B\nProse B\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertEqual(converted.count('\\small\\color[gray]'), 2)
+        self.assertIn('本文A', converted)
+        self.assertIn('本文B', converted)
+        self.assertNotIn('見出し', converted)
+        self.assertNotIn('項目', converted)
+
+    def test_translated_boundaries_track_only_the_emitted_english(self):
+        self.write('main.tex', '%j \\begin{tabular}{l}\n\\begin{tabular}{l}\n'
+                   '%j 見出し\nHeading\n%j \\end{tabular}\n\\end{tabular}\n'
+                   '%j \\begin{aligned}\nEnglish introduction.\n'
+                   '%j 本文\nProse\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertEqual(converted.count('\\small\\color[gray]'), 1)
+        self.assertNotIn('見出し', converted)
+        self.assertIn('本文', converted)
+        self.assertNotIn('\\begin{aligned}', converted)
+
+    def test_whitespace_inline_boundaries_and_escaped_percent(self):
+        self.write('main.tex', 'Text \\% \\begin \t{ tabular }{l}\n'
+                   '%j 見出し\nHeading\n  \\end {tabular}\n'
+                   '%j 日本語 \\begin{aligned}x=1\\end{aligned}\n'
+                   'English \\begin{aligned}x=1\\end{aligned}\n'
+                   '%j 本文\nProse\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertEqual(converted.count('\\small\\color[gray]'), 1)
+        self.assertNotIn('見出し', converted)
+        self.assertNotIn('日本語', converted)
+        self.assertIn('本文', converted)
+
+    def test_escaped_backslashes_are_not_environment_commands(self):
+        self.write('main.tex', '\\\\begin{tabular}\n%j 本文A\nProse A\n'
+                   '\\\\\\begin{tabular}{l}\n%j 見出し\nHeading\n'
+                   '\\end{tabular}\n%j 本文B\nProse B\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertEqual(converted.count('\\small\\color[gray]'), 2)
+        self.assertNotIn('見出し', converted)
+
+    def test_other_environments_do_not_select_english_only(self):
+        self.write('main.tex', '\\begin{tabular*}{10cm}{l}\n'
+                   '%j 本文A\nProse A\n\\end{tabular*}\n'
+                   '\\begin{align}\n%j 本文B\nProse B\n\\end{align}\n')
+        self.run_build('both')
+        converted = self.events()[0]['sources']['main.tex']
+        self.assertEqual(converted.count('\\small\\color[gray]'), 2)
+
+    def test_environment_state_is_local_to_each_copied_file(self):
+        self.write('main.tex', '\\input{sections/table}\n%j 本文\nProse\n')
+        self.write('sections/table.tex', '\\begin{tabular}{l}\n%j 見出し\nHeading\n\\end{tabular}\n')
+        self.run_build('both')
+        sources = self.events()[0]['sources']
+        self.assertIn('\\small\\color', sources['main.tex'])
+        self.assertEqual(sources['sections/table.tex'], '\\begin{tabular}{l}\nHeading\n\\end{tabular}\n')
+
     def test_prose_pair_is_small_gray_then_english_without_new_paragraph(self):
         original = '%j 日本語の文章。\nEnglish text.\n\n未翻訳。\n'
         self.write('main.tex', original)

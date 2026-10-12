@@ -57,6 +57,7 @@ TEXLINGUA_BUILDER=./scripts/compile-paper.sh ./build.sh main.tex all
 `main-ja.pdf` などへの命名と最終出力先への配置は、`build.sh` が担当します。
 
 `both` の場合は日英併記に変換したソースと、一時エントリーファイルに追加した色パッケージ読み込み用のフックを受け取ります。
+`tabular` と `aligned` 内の翻訳ペアは英語のみです。環境追跡は各 `.tex` ファイル内で独立して行います。
 表示に LaTeX 2020-10-01 以降と `color`（または原稿で読み込む `xcolor`）、日本語対応のエンジン・フォントが必要です。
 ビルダー側で変換を繰り返す必要はありません。ビルダーは通常どおり `main.pdf` を生成し、
 `build.sh` が `main-both.pdf` として配置します。第2引数を検証している独自ビルダーは `both` を許可してください。

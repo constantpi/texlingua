@@ -33,6 +33,7 @@ sub preprocess {
     $mode //= 'ja';
     my @lines = read_lines($file);
     my @result;
+    my @alignments;
     for (my $i = 0; $i < @lines; ++$i) {
         if ($lines[$i] =~ /^([\t ]*)%j[\t ]+(.*)/s) {
             my ($indent, $body) = ($1, $2);
@@ -41,8 +42,13 @@ sub preprocess {
             }
             if ($mode eq 'both') {
                 my $english = $lines[$i + 1];
+                # Only the emitted English line changes the ongoing state.
+                # Check the Japanese line separately for inline environment starts.
+                my @japanese_state = @alignments;
+                my $in_alignment = track_alignments($body, \@japanese_state);
+                $in_alignment = track_alignments($english, \@alignments) || $in_alignment;
                 # Deliberately lexical: any leading command selects English only.
-                if ($body !~ /^[\t ]*\\/ && $english !~ /^[\t ]*\\/) {
+                if (!$in_alignment && $body !~ /^[\t ]*\\/ && $english !~ /^[\t ]*\\/) {
                     my $newline = $body =~ /\r\n\z/ ? "\r\n" : "\n";
                     push @result, $indent . '{\small\color[gray]{0.45}%' . $newline,
                         $indent . $body, $indent . '\unskip}\space' . $newline;
@@ -53,6 +59,7 @@ sub preprocess {
             }
             ++$i;
         } else {
+            track_alignments($lines[$i], \@alignments) if $mode eq 'both';
             push @result, $lines[$i];
         }
     }
@@ -94,6 +101,24 @@ sub code_only {
         $slashes = $char eq '\\' ? $slashes + 1 : 0;
     }
     return $line;
+}
+
+sub track_alignments {
+    my ($line, $stack) = @_;
+    my $inside = @$stack ? 1 : 0;
+    my $code = code_only($line);
+    # Match literal commands with an odd number of leading backslashes.
+    # The stack is local to each file; macro expansion and \input are not parsed.
+    while ($code =~ /(?<!\\)(?:\\\\)*\\(begin|end)[\t ]*\{[\t ]*(tabular|aligned)[\t ]*\}/g) {
+        my ($command, $environment) = ($1, $2);
+        if ($command eq 'begin') {
+            push @$stack, $environment;
+            $inside = 1;
+        } elsif (@$stack && $stack->[-1] eq $environment) {
+            pop @$stack;
+        }
+    }
+    return $inside;
 }
 
 sub scan {
